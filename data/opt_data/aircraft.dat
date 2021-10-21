@@ -1,0 +1,45 @@
+param BusCost := 10;
+param BusStandCost := 20;
+param BridgeStandCost := 25;
+param TaxingCost := 30;
+
+        load ../data/opt_data/Flights.csv  using = csv : 
+            FLIGHTS = [ID] 
+            FlightTime = FlightTime 
+            FlightID = FlightID 
+            FlightAD = FlightAD 
+            FlightTerminal = FlightTerminal 
+            FlightClass = FlightClass 
+            BusRequired = BusRequired 
+            FlightTime = FlightTime
+        ; 
+
+        load ../data/opt_data/Stands.csv  using = csv : 
+            STANDS = [ID] 
+            StandNum = StandNum 
+            JetBridgeArrival = JetBridgeArrival 
+            JetBridgeDeparture = JetBridgeDeparture 
+            StandTerminal = StandTerminal 
+            TaxingTime = TaxingTime 
+        ; 
+
+        load ../data/opt_data/HandlingTime.csv  using = csv : 
+            CLASSES = [ID] 
+            BridgeHandlingTime = BridgeHandlingTime 
+            BusHandlingTime = BusHandlingTime 
+        ; 
+
+        load ../data/opt_data/BusTime.csv  using = csv : 
+            [StandID TerminalID] 
+            BusTime = BusTime 
+        ; 
+
+        load ../data/opt_data/Time.csv 
+        using = csv format = set : 
+            TIME
+        ; 
+
+        load ../data/opt_data/Modes.csv 
+        using = csv format = set : 
+            MODES
+        ; 
