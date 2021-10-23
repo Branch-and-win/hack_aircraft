@@ -13,7 +13,7 @@
  </ul>
 <h4>Основной стек технологий:</h4>
 <ul>
-    <li>Python(pandas, pandasql)</li>
+    <li>Python (pandas, pandasql)</li>
 	<li>Pyomo</li>
 	<li>Cbc (Coin-or branch and cut) solver</li>
  
