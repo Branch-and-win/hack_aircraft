@@ -1,4 +1,26 @@
 import pyomo.environ as pyo
+import math
+import pandas as pd
+
+
+data_folder_path = '../data/'
+raw_data_folder_path = data_folder_path + 'raw_data/'
+opt_data_folder_path = data_folder_path + 'opt_data/'
+
+FLIGHTS_STANDS_TIMES_BRIDGE_df    = pd.read_csv(opt_data_folder_path + 'SumBridge.csv')
+STANDS_TIMES_BRIDGE_dict = {idx: group['FLIGHT_ID'].tolist() for idx, group in FLIGHTS_STANDS_TIMES_BRIDGE_df.groupby(['STAND_ID','TIME_ID'])}
+STANDS_TIMES_BRIDGE_dict_keys = list(STANDS_TIMES_BRIDGE_dict.keys())
+
+FLIGHTS_STANDS_TIMES_BUS_df    = pd.read_csv(opt_data_folder_path + 'SumBus.csv')
+STANDS_TIMES_BUS_dict = {idx: group['FLIGHT_ID'].tolist() for idx, group in FLIGHTS_STANDS_TIMES_BUS_df.groupby(['STAND_ID','TIME_ID'])}
+STANDS_TIMES_BUS_dict_keys = list(STANDS_TIMES_BUS_dict.keys())
+
+FeasibleWide_df    = pd.read_csv(opt_data_folder_path + 'FeasibleWide.csv')
+FeasibleWide_dict = {idx: group['FLIGHT_ID'].tolist() for idx, group in FeasibleWide_df.groupby(['STAND_ID','TIME_ID'])}
+FeasibleWide_dict_keys = list(FeasibleWide_dict.keys())
+
+
+
 
 model = pyo.AbstractModel()
 
@@ -10,20 +32,32 @@ model.FLIGHTS = pyo.Set()
 #Момент прилета рейса
 model.FlightTime = pyo.Param(model.FLIGHTS)
 
-#Внутренний или международный рейс (I или D)
-model.FlightID = pyo.Param(model.FLIGHTS)
-
-#Метка прилет/вылет (A или D)
-model.FlightAD = pyo.Param(model.FLIGHTS)
-
 #Номер терминала рейса
 model.FlightTerminal = pyo.Param(model.FLIGHTS)
 
 #Класс ВС
 model.FlightClass = pyo.Param(model.FLIGHTS)
 
-#Количество необходимых автобусов для перевозки всех пассажиров рейса
-model.BusRequired = pyo.Param(model.FLIGHTS)
+#Метка прилет/вылет (A или D)
+model.FlightAD = pyo.Param(model.FLIGHTS)
+
+
+#Множество отобранных пар рейс - место стоянки
+model.FLIGHTS_STANDS = pyo.Set()
+
+#Суммарная затраты на размещение рейса на стоянке
+model.Cost = pyo.Param(model.FLIGHTS_STANDS)
+
+#Индикатор использования телетрапа для пары рейс - место стоянки
+model.BridgeFlag = pyo.Param(model.FLIGHTS_STANDS)
+
+
+#Моменты времени, когда стоянка занята для пары рейс - стоянка (с автобусами)
+model.FLIGHTS_STANDS_TIMES_BUS = pyo.Set()
+
+#Моменты времени, когда стоянка занята для пары рейс - стоянка (с телетрапами)
+model.FLIGHTS_STANDS_TIMES_BRIDGE = pyo.Set()
+
 
 
 #Множество терминалов
@@ -33,29 +67,15 @@ model.TERMINALS = pyo.RangeSet(1,5)
 #Множество агрегированных стоянок
 model.STANDS = pyo.Set()
 
-
-#Количество агрегированных стоянок
-model.StandNum = pyo.Param(model.STANDS)
-
-#Возможность использования телетрапа на прилете
-model.JetBridgeArrival = pyo.Param(model.STANDS)
-
-#Возможность использования телетрапа на вылете
-model.JetBridgeDeparture = pyo.Param(model.STANDS)
-
 #Принадлежность к терминалу
 model.StandTerminal = pyo.Param(model.STANDS, default = 0)
 
 #Время руления от ВПП до стоянки
 model.TaxingTime = pyo.Param(model.STANDS)
 
-#Время движения автобуса от терминала до места стоянки
-model.BusTime = pyo.Param(model.STANDS, model.TERMINALS)
-
 
 #Множество классов ВС
 model.CLASSES = pyo.Set()
-
 
 #Время на обслуживание класса ВС на контактном МС
 model.BridgeHandlingTime = pyo.Param(model.CLASSES)
@@ -64,132 +84,55 @@ model.BridgeHandlingTime = pyo.Param(model.CLASSES)
 model.BusHandlingTime = pyo.Param(model.CLASSES)
 
 
-#Множество моментов времени (с детализацией до 5 минут)
+#Множество моментов времени 
 model.TIME = pyo.Set()
 
 
-#Стоимость использования 1 минуты автобуса
-model.BusCost = pyo.Param()
-
-#Стоимость 1 минуты руления от ВПП до МС
-model.TaxingCost = pyo.Param()
-
-#Стоимость 1 минуты стоянки на МС с телетрапом
-model.BridgeStandCost = pyo.Param()
-
-#Стоимость 1 минуты стоянки на МС без телетрапа
-model.BusStandCost = pyo.Param()
-
-
-# Режимы использования МС (Автобус или телетрап)
-model.MODES = pyo.Set()
+#Уровень детализации ограничений (в минутах)
+interval = 5
 
 
 ## Переменные решения
 
-#Индикатор использования агрегированного места для рейса и выбор механизма (телетрап или автобус)
-model.z = pyo.Var(model.FLIGHTS, model.STANDS,  model.MODES, within = pyo.Binary, initialize = 0)
+
+#Индикатор использования  места стоянки для рейса
+model.z = pyo.Var(model.FLIGHTS_STANDS, within = pyo.Binary, initialize = 0)
 
 
 ## Неявные переменные решения
 
-#Количество занятых мест с использованием телетрапа в момент t
-def WideBridgeCount(m,s,t):
-    arrival_sum_bridge = sum(m.z[f,s,'bridge'] for f in m.FLIGHTS if m.FlightAD[f] == 'A' and m.FlightClass[f] == 'Wide_Body' and \
-        t in range(m.FlightTime[f] + int(m.TaxingTime[s]/5), m.FlightTime[f] + int((m.TaxingTime[s] + m.BridgeHandlingTime[m.FlightClass[f]])/5)))
-
-    departure_sum_bridge = sum(m.z[f,s,'bridge'] for f in m.FLIGHTS if m.FlightAD[f] == 'D' and m.FlightClass[f] == 'Wide_Body' and \
-        t in range(m.FlightTime[f] - int((m.TaxingTime[s] + m.BridgeHandlingTime[m.FlightClass[f]])/5), m.FlightTime[f] - int(m.TaxingTime[s]/5)))
-
-    return arrival_sum_bridge  + departure_sum_bridge 
-
-#Количество занятых мест на агрегированной стоянке в момент t
-def StandTimeCount(m,s,t):
-    arrival_sum_bridge = sum(m.z[f,s,'bridge'] for f in m.FLIGHTS if m.FlightAD[f] == 'A' and \
-        t in range(m.FlightTime[f] + int(m.TaxingTime[s]/5), m.FlightTime[f] + int((m.TaxingTime[s] + m.BridgeHandlingTime[m.FlightClass[f]])/5)))
-
-    arrival_sum_bus = sum(m.z[f,s,'bus'] for f in m.FLIGHTS if m.FlightAD[f] == 'A' and \
-        t in range(m.FlightTime[f] + int(m.TaxingTime[s]/5), (m.FlightTime[f] + int((m.TaxingTime[s] + m.BusHandlingTime[m.FlightClass[f]])/5))))
-
-    departure_sum_bridge = sum(m.z[f,s,'bridge'] for f in m.FLIGHTS if m.FlightAD[f] == 'D' and \
-        t in range(m.FlightTime[f] - int((m.TaxingTime[s] + m.BridgeHandlingTime[m.FlightClass[f]])/5), m.FlightTime[f] - int(m.TaxingTime[s]/5)))
-
-    departure_sum_bus = sum(m.z[f,s,'bus'] for f in m.FLIGHTS if m.FlightAD[f] == 'D' and \
-        t in range(m.FlightTime[f] - int((m.TaxingTime[s] + m.BusHandlingTime[m.FlightClass[f]])/5), m.FlightTime[f] - int(m.TaxingTime[s]/5)))
-
-    return arrival_sum_bus + departure_sum_bus + arrival_sum_bridge + departure_sum_bridge
-
-
-#Суммарная стоимость перевозки пассажиров на автобусе
-def BusCosts(m):
-    return sum(m.z[f,s,'bus'] * m.BusCost * m.BusRequired[f] * m.BusTime[s,m.FlightTerminal[f]] \
-           for f in m.FLIGHTS for s in m.STANDS)
-
-#Суммарная стоимость обслуживания на местах стоянки
-def StandCosts(m):
-    BusCosts = sum(m.z[f,s,'bus'] * m.BusStandCost * m.BusHandlingTime[m.FlightClass[f]] for f in m.FLIGHTS for s in m.STANDS if m.StandTerminal[s] == -1)
-    
-    BridgeCosts = sum(m.z[f,s,'bridge'] * m.BridgeStandCost * m.BridgeHandlingTime[m.FlightClass[f]] + 
-                   m.z[f,s,'bus'] * m.BridgeStandCost * m.BusHandlingTime[m.FlightClass[f]] for f in m.FLIGHTS for s in m.STANDS if m.StandTerminal[s] > 0)
-
-    #BusCosts = sum(m.z[f,s,'bus'] * m.BusStandCost * m.BusHandlingTime[m.FlightClass[f]] for f in m.FLIGHTS for s in m.STANDS)
-    #BridgeCosts = sum(m.z[f,s,'bridge'] * m.BridgeStandCost * m.BridgeHandlingTime[m.FlightClass[f]] for f in m.FLIGHTS for s in m.STANDS)
-    return BusCosts + BridgeCosts
-
-#Суммарная стоимость руления от ВВП до мест стоянки
-def TaxingCosts(m):
-    return sum(m.z[f,s,mode] * m.TaxingCost * m.TaxingTime[s] for f in m.FLIGHTS for s in m.STANDS for mode in m.MODES)
-
-
 ##  Ограничения
-
-
-#Запрет использования телетрапа
-def bridge_use_rule(m,f,s):
-    if (m.StandTerminal[s] != m.FlightTerminal[f]) or ((m.FlightAD[f] == 'A' and m.FlightID[f] != m.JetBridgeArrival[s]) and \
-            (m.FlightAD[f] == 'D' and m.FlightID[f] != m.JetBridgeDeparture[s])):
-        return m.z[f,s,'bridge'] == 0
-    else:
-        return pyo.Constraint.Skip
-
-model.bridge_use = pyo.Constraint(model.FLIGHTS, model.STANDS, rule = bridge_use_rule)
-
-#Запрет использования автобуса
-def bus_use_rule(m,f,s):
-    if (m.StandTerminal[s] == m.FlightTerminal[f]) and ((m.FlightAD[f] == 'A' and m.FlightID[f] == m.JetBridgeArrival[s]) or \
-            (m.FlightAD[f] == 'D' and m.FlightID[f] == m.JetBridgeDeparture[s])):
-        return m.z[f,s,'bus'] == 0
-    else:
-        return pyo.Constraint.Skip
-
-model.bus_use = pyo.Constraint(model.FLIGHTS, model.STANDS, rule = bus_use_rule)
 
 #Определяем множество для ограничения на соседние широкофюзеляжные ВС (оставляем только те моменты времени, когда существует возможность нарушить ограничение)
 def wide_max_set_filter(m,s,t):
-    return len([f for f in m.FLIGHTS if m.FlightAD[f] == 'A' and m.FlightClass[f] == 'Wide_Body' and \
-        t in range(m.FlightTime[f] + int(m.TaxingTime[s]/5), m.FlightTime[f] + int((m.TaxingTime[s] + m.BridgeHandlingTime[m.FlightClass[f]])/5))]) + \
-        len([f for f in m.FLIGHTS if m.FlightAD[f] == 'D' and m.FlightClass[f] == 'Wide_Body' and \
-        t in range(m.FlightTime[f] - int((m.TaxingTime[s] + m.BridgeHandlingTime[m.FlightClass[f]])/5), m.FlightTime[f] - int(m.TaxingTime[s]/5))]) \
-        > (m.StandNum[s] // 2) + (m.StandNum[s] % 2) 
+    return m.StandTerminal[s] > 0 and len([(f1,s1,t1) for (f1,s1,t1) in m.FLIGHTS_STANDS_TIMES_BRIDGE if s1 == s and t1 == t]) > 0
 
-model.WIDE_MAX_SET = pyo.Set(initialize = model.STANDS * model.TIME, filter = wide_max_set_filter)
+# model.WIDE_MAX_SET = pyo.Set(initialize = model.STANDS * model.TIME, filter = wide_max_set_filter)
 
 #Нельзя иметь рядом два широкофюзеляжных ВС с телетрапом
 def wide_max_rule(m,s,t):
-    return WideBridgeCount(m,s,t) <= (m.StandNum[s] // 2) + (m.StandNum[s] % 2) 
+    return sum(m.z[f,s] for f in FeasibleWide_dict[s,t]) \
+            + sum(m.z[f,s+1] for f in FeasibleWide_dict[s+1,t]) <= 1
 
-model.wide_max = pyo.Constraint(model.WIDE_MAX_SET, rule = wide_max_rule)
+model.WIDE_FEASIBLE_SET = pyo.Set()
+model.wide_max = pyo.Constraint(model.WIDE_FEASIBLE_SET, rule = wide_max_rule)
 
 
-#В каждый момент времени ограниченное число мест на агрегированной стоянке
+#В каждый момент времени не более одного рейса на стоянке
 def stand_capacity_rule(m,s,t):
-    return StandTimeCount(m,s,t) <= m.StandNum[s]
+    if (s,t) not in STANDS_TIMES_BRIDGE_dict_keys:
+        return sum(m.z[f,s] for f in STANDS_TIMES_BUS_dict[s,t])  <= 1
+    if (s,t) not in STANDS_TIMES_BUS_dict_keys:
+        return sum(m.z[f,s] for f in STANDS_TIMES_BRIDGE_dict[s,t])  <= 1
+    return sum(m.z[f,s] for f in STANDS_TIMES_BUS_dict[s,t]) \
+            + sum(m.z[f,s] for f in STANDS_TIMES_BRIDGE_dict[s,t])  <= 1
 
-model.stand_capacity = pyo.Constraint(model.STANDS, model.TIME, rule = stand_capacity_rule)
+model.BUS_BRIDGE_FEASIBLE_SET = pyo.Set()
+model.stand_capacity = pyo.Constraint(model.BUS_BRIDGE_FEASIBLE_SET, rule = stand_capacity_rule)
 
 #Каждому рейсу необходимо выделить ровно одну стоянку
 def one_stand_rule(m,f):
-    return sum(m.z[f,s,mode] for s in m.STANDS for mode in m.MODES) == 1
+    return sum(m.z[f,s] for (f1,s) in m.FLIGHTS_STANDS if f1 == f) == 1
 
 model.stand_rule = pyo.Constraint(model.FLIGHTS, rule = one_stand_rule)
 
@@ -198,10 +141,6 @@ model.stand_rule = pyo.Constraint(model.FLIGHTS, rule = one_stand_rule)
 
 
 def ObjCosts(m):
-    return BusCosts(m) + StandCosts(m) + TaxingCosts(m) 
+    return sum(m.z[f,s] * m.Cost[f,s] for (f,s) in m.FLIGHTS_STANDS)
 
-model.OBJ = pyo.Objective(rule = ObjCosts, sense=pyo.minimize)
-
-
-
-
+model.OBJ = pyo.Objective(rule = ObjCosts, sense = pyo.minimize)
